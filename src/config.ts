@@ -18,4 +18,5 @@ export const env = {
   SUPABASE_URL: required('SUPABASE_URL'),
   SUPABASE_SERVICE_ROLE_KEY: required('SUPABASE_SERVICE_ROLE_KEY'),
   SUPERADMIN_IDS: parseIds(process.env.SUPERADMIN_IDS),
+  ADMIN_IDS: parseIds(process.env.ADMIN_IDS),
 };

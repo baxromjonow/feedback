@@ -1,120 +1,58 @@
-# Al-Aziz Academy — Talab / Taklif / Shikoyat bot
+# Al-Aziz Academy Feedback Bot — v0.2
 
-Starter v0.1:
-- Telegram webhook
-- Student / Employee deep-link
-- Smooth inline callbacks
-- Supabase PostgreSQL
-- Text ticket yaratish
-- "Mening murojaatlarim"
-- Superadmin notification
-- Webhook secret verification
-- Vercel `waitUntil()` for non-critical work
+## Yangi funksiyalar
+- Yangi anonimlik matni
+- Admin panel
+- Statuslar: Yangi / Ko‘rib chiqilmoqda / Jarayonda / Hal qilindi
+- Admin → foydalanuvchi anonim javob
+- Foydalanuvchi → admin javob
+- `Mening murojaatlarim` ichida ticket ochish
+- Superadmin identity reveal + audit log
+- Admin uchun shaxsiy ma’lumotlarsiz `admin_ticket_view`
+- Foydalanuvchi matnlarini HTML escape qilish
+- Callback spinnerini darhol yopish
 
-## 1. Supabase
+## v0.1 dan v0.2 ga yangilash
 
-Yangi Supabase project yarating.
+### 1. Supabase migration
+Supabase → SQL Editor → `supabase/v0.2.sql` faylini to‘liq qo‘ying va Run bosing.
 
-`supabase/schema.sql` faylini:
-**Supabase → SQL Editor → New query**
-ichiga to‘liq qo‘yib **Run** bosing.
+### 2. Vercel ENV
+Eski ENV qiymatlar qoladi.
 
-## 2. Local env
-
-`.env.example` dan `.env.local` yarating:
-
+Qo‘shimcha, oddiy adminlar bo‘lsa:
 ```env
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_WEBHOOK_SECRET=...
-SUPABASE_URL=...
-SUPABASE_SERVICE_ROLE_KEY=...
-SUPERADMIN_IDS=...
-WEBHOOK_URL=https://YOUR-VERCEL-DOMAIN.vercel.app/api/telegram
+ADMIN_IDS=111111111,222222222
 ```
 
-`SUPABASE_SERVICE_ROLE_KEY` faqat serverda turishi kerak.
-GitHubga `.env.local` yubormang.
+`SUPERADMIN_IDS` ichidagi ID avtomatik admin hisoblanadi.
+Agar hozir faqat superadmin bo‘lsa, `ADMIN_IDS` bo‘sh qolishi mumkin.
 
-## 3. Install
-
+### 3. Tekshirish
 ```bash
 npm install
 npm run typecheck
 ```
 
-Local:
+### 4. GitHubga push
 ```bash
-npm run dev
-```
-
-Telegram webhook uchun public HTTPS URL kerak, shuning uchun asosiy testni Vercel deploydan keyin qilamiz.
-
-## 4. GitHub + Vercel
-
-```bash
-git init
 git add .
-git commit -m "Initial feedback bot"
-git branch -M main
-git remote add origin YOUR_GITHUB_REPO
-git push -u origin main
+git commit -m "Feedback bot v0.2"
+git push
 ```
 
-Vercel projectni GitHub repoga ulang.
+Vercel GitHub pushdan keyin redeploy qiladi.
 
-Vercel → Settings → Environment Variables:
-- TELEGRAM_BOT_TOKEN
-- TELEGRAM_WEBHOOK_SECRET
-- SUPABASE_URL
-- SUPABASE_SERVICE_ROLE_KEY
-- SUPERADMIN_IDS
-
-Node.js runtime sifatida Node 22 yoki undan yangi LTS ishlating.
-
-## 5. Webhook o‘rnatish
-
-Deploydan keyin `.env.local` ichida:
-
-```env
-WEBHOOK_URL=https://YOUR-DOMAIN.vercel.app/api/telegram
-```
-
-so‘ng:
-
-```bash
-npm run set-webhook
-```
-
-## 6. QR deep-link
-
-O‘quvchi QR:
+### 5. Test
+Oddiy oqim:
 ```text
-https://t.me/YOUR_BOT_USERNAME?start=student
+/start student
 ```
 
-Xodim QR:
+Admin panel:
 ```text
-https://t.me/YOUR_BOT_USERNAME?start=employee
+/admin
 ```
 
-QR ni keyin shu ikkita linkdan chizamiz.
-
-## Smooth arxitektura
-
-- `/start` javobi Telegram webhook HTTP response orqali bevosita ketadi.
-- Inline callback spinneri darhol `answerCallbackQuery` bilan yopiladi.
-- DB/log/admin notification kabi ikkilamchi ishlar `waitUntil()`ga beriladi.
-- Ticket yaratish DB ichidagi RPC orqali bitta round-tripda bajariladi.
-- Telegram API fetchlariga timeout qo‘yilgan.
-- SQL indexlar status, type, telegram_id va created_at bo‘yicha qo‘yilgan.
-
-## Keyingi versiya
-
-v0.2:
-- rasm / video / voice / document
-- admin panel
-- superadmin identity reveal + audit log
-- ticket ichida anonim yozishma
-- status o‘zgartirish
-- baholash
-- rate limit
+## Xavfsizlik
+`.env.local`, bot token va `sb_secret_...` kalitni GitHubga yubormang.

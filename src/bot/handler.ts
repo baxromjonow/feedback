@@ -2,24 +2,60 @@ import type {
   TelegramUpdate,
   TelegramWebhookMethod,
 } from '../telegram/types.js';
-import { mainMenu, ticketTypes, backHome } from '../telegram/keyboards.js';
+import {
+  mainMenu,
+  ticketTypes,
+  backHome,
+  adminHome,
+  backAdmin,
+} from '../telegram/keyboards.js';
 import { editMessageText, sendMessage } from '../telegram/api.js';
 import { upsertTelegramUser, type UserType } from '../db/users.js';
 import {
+  consumeAdminReplyState,
+  consumeUserReplyState,
   createTicketFromState,
+  setAdminReplyState,
   setTicketState,
+  setUserReplyState,
   type TicketType,
 } from '../db/states.js';
-import { listMyTickets } from '../db/tickets.js';
+import {
+  addTicketMessage,
+  getAdminTicket,
+  getMyTicket,
+  getTicketOwnerId,
+  listAdminTickets,
+  listMyTickets,
+  revealTicketIdentity,
+  updateTicketStatus,
+  type TicketStatus,
+} from '../db/tickets.js';
 import { env } from '../config.js';
+import { isAdmin, isSuperadmin } from './auth.js';
+import { esc } from '../utils/html.js';
 
 type WaitUntil = (promise: Promise<unknown>) => void;
+type Button = { text: string; callback_data: string };
 
 const typeLabels: Record<TicketType, string> = {
   suggestion: '💡 Taklif',
   complaint: '📢 Shikoyat',
   request: '📝 Talab',
   other: '💬 Boshqa',
+};
+
+const statusLabels: Record<TicketStatus, string> = {
+  new: '🆕 Yangi',
+  reviewing: '👀 Ko‘rib chiqilmoqda',
+  progress: '🛠 Jarayonda',
+  resolved: '✅ Hal qilindi',
+};
+
+const sourceLabels: Record<string, string> = {
+  student: '🎓 O‘quvchi',
+  employee: '💼 Xodim',
+  unknown: '👤 Foydalanuvchi',
 };
 
 function directSendMessage(
@@ -52,40 +88,189 @@ function parseStartSource(text?: string): UserType {
   return 'unknown';
 }
 
-function welcomeText(source: UserType) {
+function welcomeText(source: UserType): string {
   const audience =
     source === 'student'
       ? '🎓 O‘quvchi'
       : source === 'employee'
         ? '💼 Xodim'
-        : '👋 Foydalanuvchi';
+        : '👋 Xush kelibsiz';
 
   return [
     `<b>${audience}</b>`,
     '',
-    'Assalomu alaykum! Fikringiz biz uchun muhim.',
-    'Taklif, talab yoki shikoyatingizni maxfiy tarzda yuborishingiz mumkin.',
+    'Assalomu alaykum!',
+    'Fikringiz biz uchun muhim.',
+    'Taklif, talab yoki shikoyatingizni erkin tarzda yuborishingiz mumkin.',
     '',
-    '<i>Shaxsiy ma’lumotlar faqat maxsus vakolatli superadmin uchun ko‘rinadi.</i>',
+    '🔒 <b>Fikringiz erkin, murojaatingiz maxfiy.</b>',
+    'Murojaatlar anonim tarzda ko‘rib chiqiladi.',
   ].join('\n');
 }
 
-async function notifySuperadmins(ticketCode: string, text: string) {
-  if (!env.SUPERADMIN_IDS.length) return;
+function adminTicketButtons(ticketCode: string, superadmin: boolean) {
+  const rows: Button[][] = [
+    [{ text: '💬 Anonim javob', callback_data: `admin:reply:${ticketCode}` }],
+    [
+      {
+        text: '👀 Ko‘rilmoqda',
+        callback_data: `admin:set:${ticketCode}:reviewing`,
+      },
+      {
+        text: '🛠 Jarayonda',
+        callback_data: `admin:set:${ticketCode}:progress`,
+      },
+    ],
+    [
+      {
+        text: '✅ Hal qilindi',
+        callback_data: `admin:set:${ticketCode}:resolved`,
+      },
+    ],
+  ];
+
+  if (superadmin) {
+    rows.push([
+      {
+        text: '👁 Muallifni ko‘rish',
+        callback_data: `super:reveal:${ticketCode}`,
+      },
+    ]);
+  }
+
+  rows.push([{ text: '⬅️ Murojaatlar', callback_data: 'admin:list:all' }]);
+  return { inline_keyboard: rows };
+}
+
+function revealReasonKeyboard(ticketCode: string) {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: '🛡 Xavfsizlik',
+          callback_data: `super:reason:${ticketCode}:security`,
+        },
+      ],
+      [
+        {
+          text: '📞 Bog‘lanish zarur',
+          callback_data: `super:reason:${ticketCode}:contact`,
+        },
+      ],
+      [
+        {
+          text: '🔎 Tekshiruv',
+          callback_data: `super:reason:${ticketCode}:review`,
+        },
+      ],
+      [{ text: '⬅️ Orqaga', callback_data: `admin:view:${ticketCode}` }],
+    ],
+  };
+}
+
+function userTicketKeyboard(ticketCode: string) {
+  return {
+    inline_keyboard: [
+      [{ text: '💬 Javob yozish', callback_data: `user:reply:${ticketCode}` }],
+      [{ text: '⬅️ Murojaatlarim', callback_data: 'tickets:mine' }],
+    ],
+  };
+}
+
+function formatThread(
+  messages: Array<{ sender_type: string; text: string | null }>,
+): string {
+  if (!messages.length) return '';
+
+  const lines = messages.map((message) => {
+    const who =
+      message.sender_type === 'user'
+        ? '👤 Murojaatchi'
+        : message.sender_type === 'superadmin'
+          ? '👑 Rahbariyat'
+          : '💼 Admin';
+
+    return `${who}: ${esc(message.text ?? '')}`;
+  });
+
+  return `\n\n<b>Yozishmalar:</b>\n${lines.join('\n\n')}`;
+}
+
+async function notifyAdmins(
+  ticketCode: string,
+  text: string,
+  type: TicketType,
+) {
+  const ids = [...new Set([...env.ADMIN_IDS, ...env.SUPERADMIN_IDS])];
+  if (!ids.length) return;
 
   await Promise.allSettled(
-    env.SUPERADMIN_IDS.map((chatId) =>
+    ids.map((chatId) =>
       sendMessage(
         chatId,
         [
-          '🆕 <b>Yangi murojaat</b>',
+          '🆕 <b>YANGI MUROJAAT</b>',
           '',
-          `<b>${ticketCode}</b>`,
-          text.length > 500 ? `${text.slice(0, 500)}…` : text,
+          `<b>#${esc(ticketCode)}</b>`,
+          typeLabels[type],
+          '',
+          '<b>Murojaat:</b>',
+          esc(text.length > 700 ? `${text.slice(0, 700)}…` : text),
+          '',
+          '🔒 Muallif anonim ko‘rsatiladi.',
         ].join('\n'),
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: '📂 Ochish',
+                  callback_data: `admin:view:${ticketCode}`,
+                },
+              ],
+            ],
+          },
+        },
       ),
     ),
   );
+}
+
+async function renderAdminTicket(
+  chatId: number,
+  messageId: number,
+  ticketCode: string,
+  superadmin: boolean,
+) {
+  const ticket = await getAdminTicket(ticketCode);
+
+  if (!ticket) {
+    await editMessageText(chatId, messageId, '⚠️ Murojaat topilmadi.', {
+      reply_markup: backAdmin,
+    });
+    return;
+  }
+
+  const type = typeLabels[ticket.type as TicketType] ?? esc(ticket.type);
+  const status =
+    statusLabels[ticket.status as TicketStatus] ?? esc(ticket.status);
+  const source = sourceLabels[ticket.source] ?? '👤 Foydalanuvchi';
+
+  const body = [
+    `📨 <b>#${esc(ticket.ticket_code)}</b>`,
+    '',
+    type,
+    source,
+    status,
+    '',
+    '<b>Murojaat:</b>',
+    esc(ticket.text),
+    formatThread(ticket.messages),
+  ].join('\n');
+
+  await editMessageText(chatId, messageId, body, {
+    reply_markup: adminTicketButtons(ticket.ticket_code, superadmin),
+  });
 }
 
 export async function handleUpdate(
@@ -96,8 +281,8 @@ export async function handleUpdate(
 
   if (message?.from && message.text?.startsWith('/start')) {
     const source = parseStartSource(message.text);
+    const admin = isAdmin(message.from.id);
 
-    // User sees the menu immediately; DB write does not block the response.
     waitUntil(
       upsertTelegramUser({
         telegramId: message.from.id,
@@ -108,7 +293,23 @@ export async function handleUpdate(
       }).catch((error) => console.error('User upsert failed:', error)),
     );
 
-    return directSendMessage(message.chat.id, welcomeText(source), mainMenu);
+    return directSendMessage(message.chat.id, welcomeText(source), mainMenu(admin));
+  }
+
+  if (message?.from && message.text === '/admin') {
+    if (!isAdmin(message.from.id)) {
+      return directSendMessage(
+        message.chat.id,
+        '⛔ Bu bo‘lim faqat vakolatli adminlar uchun.',
+        mainMenu(false),
+      );
+    }
+
+    return directSendMessage(
+      message.chat.id,
+      '🛠 <b>Admin panel</b>\n\nKerakli bo‘limni tanlang:',
+      adminHome,
+    );
   }
 
   const callback = update.callback_query;
@@ -118,6 +319,8 @@ export async function handleUpdate(
     const messageId = callback.message.message_id;
     const telegramId = callback.from.id;
     const data = callback.data;
+    const admin = isAdmin(telegramId);
+    const superadmin = isSuperadmin(telegramId);
 
     if (data === 'menu:home') {
       waitUntil(
@@ -125,10 +328,9 @@ export async function handleUpdate(
           chatId,
           messageId,
           '🏠 <b>Bosh menyu</b>\n\nKerakli bo‘limni tanlang:',
-          { reply_markup: mainMenu },
+          { reply_markup: mainMenu(admin) },
         ).catch((error) => console.error('Edit menu failed:', error)),
       );
-
       return directAnswerCallback(callback.id);
     }
 
@@ -141,23 +343,17 @@ export async function handleUpdate(
           { reply_markup: ticketTypes },
         ).catch((error) => console.error('Edit ticket menu failed:', error)),
       );
-
       return directAnswerCallback(callback.id);
     }
 
     if (data.startsWith('ticket:type:')) {
       const type = data.replace('ticket:type:', '') as TicketType;
+      if (!(type in typeLabels)) return directAnswerCallback(callback.id);
 
-      if (!(type in typeLabels)) {
-        return directAnswerCallback(callback.id);
-      }
-
-      // Spinner ends immediately. Critical state is stored first, then prompt is sent.
       waitUntil(
         (async () => {
           try {
             await setTicketState(telegramId, type);
-
             await sendMessage(
               chatId,
               `${typeLabels[type]} tanlandi.\n\nMurojaatingizni bitta xabarda yozing ✍️`,
@@ -177,7 +373,6 @@ export async function handleUpdate(
           }
         })(),
       );
-
       return directAnswerCallback(callback.id);
     }
 
@@ -187,31 +382,106 @@ export async function handleUpdate(
           try {
             const tickets = await listMyTickets(telegramId);
 
-            const body = tickets.length
-              ? tickets
-                  .map((ticket) => {
-                    const label =
-                      typeLabels[ticket.type as TicketType] ?? ticket.type;
-                    return `<b>${ticket.ticket_code}</b> — ${label}\n${ticket.status}`;
-                  })
-                  .join('\n\n')
-              : 'Hozircha murojaatlaringiz yo‘q.';
+            if (!tickets.length) {
+              await editMessageText(
+                chatId,
+                messageId,
+                '📋 <b>Mening murojaatlarim</b>\n\nHozircha murojaatlaringiz yo‘q.',
+                { reply_markup: backHome },
+              );
+              return;
+            }
+
+            const buttons: Button[][] = tickets.map((ticket) => [
+              {
+                text: `${ticket.ticket_code} • ${
+                  statusLabels[ticket.status as TicketStatus] ?? ticket.status
+                }`,
+                callback_data: `user:view:${ticket.ticket_code}`,
+              },
+            ]);
+            buttons.push([{ text: '⬅️ Bosh menyu', callback_data: 'menu:home' }]);
 
             await editMessageText(
               chatId,
               messageId,
-              `📋 <b>Mening murojaatlarim</b>\n\n${body}`,
-              { reply_markup: backHome },
+              '📋 <b>Mening murojaatlarim</b>\n\nKo‘rish uchun murojaatni tanlang:',
+              { reply_markup: { inline_keyboard: buttons } },
             );
           } catch (error) {
             console.error('List tickets failed:', error);
-            await sendMessage(chatId, '⚠️ Ro‘yxatni yuklab bo‘lmadi.').catch(
-              () => undefined,
-            );
           }
         })(),
       );
+      return directAnswerCallback(callback.id);
+    }
 
+    if (data.startsWith('user:view:')) {
+      const ticketCode = data.replace('user:view:', '');
+
+      waitUntil(
+        (async () => {
+          try {
+            const ticket = await getMyTicket(telegramId, ticketCode);
+            if (!ticket) {
+              await editMessageText(chatId, messageId, '⚠️ Murojaat topilmadi.', {
+                reply_markup: backHome,
+              });
+              return;
+            }
+
+            const type = typeLabels[ticket.type as TicketType] ?? esc(ticket.type);
+            const status =
+              statusLabels[ticket.status as TicketStatus] ?? esc(ticket.status);
+
+            await editMessageText(
+              chatId,
+              messageId,
+              [
+                `📨 <b>#${esc(ticket.ticket_code)}</b>`,
+                '',
+                type,
+                status,
+                '',
+                '<b>Murojaat:</b>',
+                esc(ticket.text),
+                formatThread(ticket.messages),
+              ].join('\n'),
+              { reply_markup: userTicketKeyboard(ticket.ticket_code) },
+            );
+          } catch (error) {
+            console.error('Open user ticket failed:', error);
+          }
+        })(),
+      );
+      return directAnswerCallback(callback.id);
+    }
+
+    if (data.startsWith('user:reply:')) {
+      const ticketCode = data.replace('user:reply:', '');
+
+      waitUntil(
+        (async () => {
+          try {
+            const ticket = await getMyTicket(telegramId, ticketCode);
+            if (!ticket) return;
+
+            await setUserReplyState(telegramId, ticketCode);
+            await sendMessage(
+              chatId,
+              `💬 <b>#${esc(ticketCode)}</b> bo‘yicha javobingizni yozing:`,
+              {
+                reply_markup: {
+                  force_reply: true,
+                  input_field_placeholder: 'Javobingiz...',
+                },
+              },
+            );
+          } catch (error) {
+            console.error('User reply state failed:', error);
+          }
+        })(),
+      );
       return directAnswerCallback(callback.id);
     }
 
@@ -225,54 +495,348 @@ export async function handleUpdate(
             '',
             'Bu bot o‘quv markaziga talab, taklif va shikoyatlarni yuborish uchun yaratilgan.',
             '',
-            '🔒 Murojaatlar maxfiy saqlanadi.',
-            'Oddiy admin muallifning shaxsiy ma’lumotlarini ko‘rmaydi.',
+            '🔒 <b>Fikringiz erkin, murojaatingiz maxfiy.</b>',
+            'Murojaatlar anonim tarzda ko‘rib chiqiladi.',
           ].join('\n'),
           { reply_markup: backHome },
         ).catch((error) => console.error('About edit failed:', error)),
       );
+      return directAnswerCallback(callback.id);
+    }
 
+    // ADMIN
+    if (data === 'admin:home') {
+      if (!admin) return directAnswerCallback(callback.id);
+
+      waitUntil(
+        editMessageText(
+          chatId,
+          messageId,
+          '🛠 <b>Admin panel</b>\n\nKerakli bo‘limni tanlang:',
+          { reply_markup: adminHome },
+        ).catch((error) => console.error('Admin home failed:', error)),
+      );
+      return directAnswerCallback(callback.id);
+    }
+
+    if (data.startsWith('admin:list:')) {
+      if (!admin) return directAnswerCallback(callback.id);
+
+      const rawStatus = data.replace('admin:list:', '');
+      const status = rawStatus === 'all' ? undefined : (rawStatus as TicketStatus);
+
+      waitUntil(
+        (async () => {
+          try {
+            const tickets = await listAdminTickets(status);
+
+            if (!tickets.length) {
+              await editMessageText(
+                chatId,
+                messageId,
+                '📭 Bu bo‘limda hozircha murojaat yo‘q.',
+                { reply_markup: backAdmin },
+              );
+              return;
+            }
+
+            const buttons: Button[][] = tickets.map((ticket) => [
+              {
+                text: `${ticket.ticket_code} • ${
+                  typeLabels[ticket.type as TicketType] ?? ticket.type
+                } • ${statusLabels[ticket.status as TicketStatus] ?? ticket.status}`,
+                callback_data: `admin:view:${ticket.ticket_code}`,
+              },
+            ]);
+            buttons.push([{ text: '⬅️ Admin panel', callback_data: 'admin:home' }]);
+
+            await editMessageText(
+              chatId,
+              messageId,
+              '📚 <b>Murojaatlar</b>\n\nOchish uchun tanlang:',
+              { reply_markup: { inline_keyboard: buttons } },
+            );
+          } catch (error) {
+            console.error('Admin list failed:', error);
+          }
+        })(),
+      );
+      return directAnswerCallback(callback.id);
+    }
+
+    if (data.startsWith('admin:view:')) {
+      if (!admin) return directAnswerCallback(callback.id);
+      const ticketCode = data.replace('admin:view:', '');
+
+      waitUntil(
+        renderAdminTicket(chatId, messageId, ticketCode, superadmin).catch(
+          (error) => console.error('Admin ticket render failed:', error),
+        ),
+      );
+      return directAnswerCallback(callback.id);
+    }
+
+    if (data.startsWith('admin:set:')) {
+      if (!admin) return directAnswerCallback(callback.id);
+
+      const [, , ticketCode, rawStatus] = data.split(':');
+      const status = rawStatus as TicketStatus;
+      if (!(status in statusLabels)) return directAnswerCallback(callback.id);
+
+      waitUntil(
+        (async () => {
+          try {
+            const ownerId = await updateTicketStatus(ticketCode, status);
+            await Promise.allSettled([
+              renderAdminTicket(chatId, messageId, ticketCode, superadmin),
+              sendMessage(
+                ownerId,
+                `🔔 <b>#${esc(ticketCode)}</b> holati yangilandi:\n${statusLabels[status]}`,
+              ),
+            ]);
+          } catch (error) {
+            console.error('Update status failed:', error);
+          }
+        })(),
+      );
+      return directAnswerCallback(callback.id);
+    }
+
+    if (data.startsWith('admin:reply:')) {
+      if (!admin) return directAnswerCallback(callback.id);
+      const ticketCode = data.replace('admin:reply:', '');
+
+      waitUntil(
+        (async () => {
+          try {
+            await setAdminReplyState(telegramId, ticketCode);
+            await sendMessage(
+              chatId,
+              `💬 <b>#${esc(ticketCode)}</b> uchun anonim javobingizni yozing:`,
+              {
+                reply_markup: {
+                  force_reply: true,
+                  input_field_placeholder: 'Javobingiz...',
+                },
+              },
+            );
+          } catch (error) {
+            console.error('Admin reply state failed:', error);
+          }
+        })(),
+      );
+      return directAnswerCallback(callback.id);
+    }
+
+    // SUPERADMIN
+    if (data.startsWith('super:reveal:')) {
+      if (!superadmin) return directAnswerCallback(callback.id);
+      const ticketCode = data.replace('super:reveal:', '');
+
+      waitUntil(
+        editMessageText(
+          chatId,
+          messageId,
+          [
+            '👁 <b>Muallif ma’lumotini ochish</b>',
+            '',
+            'Bu harakat audit tarixiga yoziladi.',
+            'Sababni tanlang:',
+          ].join('\n'),
+          { reply_markup: revealReasonKeyboard(ticketCode) },
+        ).catch((error) => console.error('Reveal menu failed:', error)),
+      );
+      return directAnswerCallback(callback.id);
+    }
+
+    if (data.startsWith('super:reason:')) {
+      if (!superadmin) return directAnswerCallback(callback.id);
+
+      const [, , ticketCode, reasonCode] = data.split(':');
+      const reasons: Record<string, string> = {
+        security: 'Xavfsizlik',
+        contact: 'Bog‘lanish zarur',
+        review: 'Tekshiruv',
+      };
+      const reason = reasons[reasonCode] ?? 'Boshqa';
+
+      waitUntil(
+        (async () => {
+          try {
+            const user = await revealTicketIdentity(ticketCode, telegramId, reason);
+
+            await editMessageText(
+              chatId,
+              messageId,
+              [
+                '👁 <b>Muallif ma’lumoti</b>',
+                '',
+                `<b>#${esc(ticketCode)}</b>`,
+                `Sabab: ${esc(reason)}`,
+                '',
+                `Ism: ${esc(user.full_name || 'Ko‘rsatilmagan')}`,
+                `Username: ${user.username ? '@' + esc(user.username) : 'Yo‘q'}`,
+                `Telegram ID: <code>${esc(user.telegram_id)}</code>`,
+                `Turi: ${sourceLabels[user.user_type] ?? esc(user.user_type)}`,
+                '',
+                '🧾 Bu ko‘rish audit tarixiga yozildi.',
+              ].join('\n'),
+              {
+                reply_markup: {
+                  inline_keyboard: [
+                    [
+                      {
+                        text: '⬅️ Murojaatga qaytish',
+                        callback_data: `admin:view:${ticketCode}`,
+                      },
+                    ],
+                  ],
+                },
+              },
+            );
+          } catch (error) {
+            console.error('Reveal identity failed:', error);
+          }
+        })(),
+      );
       return directAnswerCallback(callback.id);
     }
 
     return directAnswerCallback(callback.id);
   }
 
+  // TEXT INPUT
   if (message?.from && message.text && !message.text.startsWith('/')) {
-    try {
-      const ticketCode = await createTicketFromState(
-        message.from.id,
-        message.text.trim(),
-      );
+    const telegramId = message.from.id;
+    const chatId = message.chat.id;
+    const text = message.text.trim();
 
-      if (!ticketCode) {
+    // Admin reply takes priority.
+    if (isAdmin(telegramId)) {
+      try {
+        const adminReplyTicket = await consumeAdminReplyState(telegramId);
+
+        if (adminReplyTicket) {
+          const ownerId = await getTicketOwnerId(adminReplyTicket);
+          if (!ownerId) throw new Error('Ticket owner not found');
+
+          await addTicketMessage(
+            adminReplyTicket,
+            isSuperadmin(telegramId) ? 'superadmin' : 'admin',
+            text,
+          );
+
+          waitUntil(
+            sendMessage(
+              ownerId,
+              [
+                `📩 <b>#${esc(adminReplyTicket)}</b> murojaatingizga javob:`,
+                '',
+                esc(text),
+              ].join('\n'),
+              {
+                reply_markup: {
+                  inline_keyboard: [
+                    [
+                      {
+                        text: '💬 Javob berish',
+                        callback_data: `user:reply:${adminReplyTicket}`,
+                      },
+                    ],
+                  ],
+                },
+              },
+            ).catch((error) => console.error('Owner notify failed:', error)),
+          );
+
+          return directSendMessage(
+            chatId,
+            `✅ <b>#${esc(adminReplyTicket)}</b> ga anonim javob yuborildi.`,
+            adminHome,
+          );
+        }
+      } catch (error) {
+        console.error('Admin text reply failed:', error);
+      }
+    }
+
+    // User reply to existing ticket.
+    try {
+      const replyTicket = await consumeUserReplyState(telegramId);
+
+      if (replyTicket) {
+        await addTicketMessage(replyTicket, 'user', text);
+
+        const adminIds = [...new Set([...env.ADMIN_IDS, ...env.SUPERADMIN_IDS])];
+        waitUntil(
+          Promise.allSettled(
+            adminIds.map((id) =>
+              sendMessage(
+                id,
+                [
+                  `💬 <b>#${esc(replyTicket)}</b> bo‘yicha yangi javob`,
+                  '',
+                  esc(text),
+                ].join('\n'),
+                {
+                  reply_markup: {
+                    inline_keyboard: [
+                      [
+                        {
+                          text: '📂 Ochish',
+                          callback_data: `admin:view:${replyTicket}`,
+                        },
+                      ],
+                    ],
+                  },
+                },
+              ),
+            ),
+          ),
+        );
+
         return directSendMessage(
-          message.chat.id,
+          chatId,
+          `✅ <b>#${esc(replyTicket)}</b> bo‘yicha javobingiz yuborildi.`,
+          mainMenu(isAdmin(telegramId)),
+        );
+      }
+    } catch (error) {
+      console.error('User reply failed:', error);
+    }
+
+    // New ticket.
+    try {
+      const created = await createTicketFromState(telegramId, text);
+
+      if (!created) {
+        return directSendMessage(
+          chatId,
           '🏠 Murojaat yuborish uchun bosh menyudan <b>“✍️ Murojaat yuborish”</b> tugmasini tanlang.',
-          mainMenu,
+          mainMenu(isAdmin(telegramId)),
         );
       }
 
-      waitUntil(notifySuperadmins(ticketCode, message.text));
+      waitUntil(notifyAdmins(created.ticketCode, text, created.type));
 
       return directSendMessage(
-        message.chat.id,
+        chatId,
         [
           '✅ <b>Murojaatingiz qabul qilindi!</b>',
           '',
-          `Murojaat raqami: <b>${ticketCode}</b>`,
+          `Murojaat raqami: <b>#${esc(created.ticketCode)}</b>`,
           '',
           'Holatini “📋 Mening murojaatlarim” bo‘limidan kuzatishingiz mumkin.',
         ].join('\n'),
-        mainMenu,
+        mainMenu(isAdmin(telegramId)),
       );
     } catch (error) {
       console.error('Create ticket failed:', error);
 
       return directSendMessage(
-        message.chat.id,
+        chatId,
         '⚠️ Hozir kichik texnik muammo yuz berdi. Iltimos, qayta urinib ko‘ring.',
-        mainMenu,
+        mainMenu(isAdmin(telegramId)),
       );
     }
   }

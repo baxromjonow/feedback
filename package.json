@@ -1,0 +1,23 @@
+{
+  "name": "alaziz-feedback-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "typecheck": "tsc --noEmit",
+    "set-webhook": "node --env-file=.env.local scripts/set-webhook.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.110.8",
+    "@vercel/functions": "3.7.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vercel": "^48.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

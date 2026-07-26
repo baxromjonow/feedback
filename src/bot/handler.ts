@@ -179,10 +179,25 @@ function userTicketKeyboard(ticketCode: string) {
 
 function formatThread(
   messages: Array<{ sender_type: string; text: string | null }>,
+  originalText?: string,
 ): string {
   if (!messages.length) return '';
 
-  const lines = messages.map((message) => {
+  const cleaned = messages.filter((message, index) => {
+    if (
+      index === 0 &&
+      message.sender_type === 'user' &&
+      originalText &&
+      (message.text ?? '').trim() === originalText.trim()
+    ) {
+      return false;
+    }
+    return true;
+  });
+
+  if (!cleaned.length) return '';
+
+  const lines = cleaned.map((message) => {
     const who =
       message.sender_type === 'user'
         ? '👤 Murojaatchi'
@@ -194,6 +209,34 @@ function formatThread(
   });
 
   return `\n\n<b>Yozishmalar:</b>\n${lines.join('\n\n')}`;
+}
+
+function adminReplySentKeyboard(ticketCode: string) {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: '📂 Murojaatga qaytish',
+          callback_data: `admin:view:${ticketCode}`,
+        },
+      ],
+      [{ text: '🛠 Admin panel', callback_data: 'admin:home' }],
+    ],
+  };
+}
+
+function userReplySentKeyboard(ticketCode: string) {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: '📂 Murojaatni ko‘rish',
+          callback_data: `user:view:${ticketCode}`,
+        },
+      ],
+      [{ text: '🏠 Bosh menyu', callback_data: 'menu:home' }],
+    ],
+  };
 }
 
 async function notifyAdmins(
@@ -265,7 +308,7 @@ async function renderAdminTicket(
     '',
     '<b>Murojaat:</b>',
     esc(ticket.text),
-    formatThread(ticket.messages),
+    formatThread(ticket.messages, ticket.text),
   ].join('\n');
 
   await editMessageText(chatId, messageId, body, {
@@ -307,7 +350,7 @@ export async function handleUpdate(
 
     return directSendMessage(
       message.chat.id,
-      '🛠 <b>Admin panel</b>\n\nKerakli bo‘limni tanlang:',
+      '🛠 <b>ADMIN PANEL</b>\n\nMurojaatlarni holati bo‘yicha boshqaring:',
       adminHome,
     );
   }
@@ -445,7 +488,7 @@ export async function handleUpdate(
                 '',
                 '<b>Murojaat:</b>',
                 esc(ticket.text),
-                formatThread(ticket.messages),
+                formatThread(ticket.messages, ticket.text),
               ].join('\n'),
               { reply_markup: userTicketKeyboard(ticket.ticket_code) },
             );
@@ -512,7 +555,7 @@ export async function handleUpdate(
         editMessageText(
           chatId,
           messageId,
-          '🛠 <b>Admin panel</b>\n\nKerakli bo‘limni tanlang:',
+          '🛠 <b>ADMIN PANEL</b>\n\nMurojaatlarni holati bo‘yicha boshqaring:',
           { reply_markup: adminHome },
         ).catch((error) => console.error('Admin home failed:', error)),
       );
@@ -669,17 +712,17 @@ export async function handleUpdate(
               chatId,
               messageId,
               [
-                '👁 <b>Muallif ma’lumoti</b>',
+                '👁 <b>MUALLIF MA’LUMOTI</b>',
                 '',
-                `<b>#${esc(ticketCode)}</b>`,
-                `Sabab: ${esc(reason)}`,
+                `📨 <b>#${esc(ticketCode)}</b>`,
+                `🔎 Ochish sababi: ${esc(reason)}`,
                 '',
-                `Ism: ${esc(user.full_name || 'Ko‘rsatilmagan')}`,
-                `Username: ${user.username ? '@' + esc(user.username) : 'Yo‘q'}`,
-                `Telegram ID: <code>${esc(user.telegram_id)}</code>`,
-                `Turi: ${sourceLabels[user.user_type] ?? esc(user.user_type)}`,
+                `👤 ${esc(user.full_name || 'Ko‘rsatilmagan')}`,
+                `🔗 ${user.username ? '@' + esc(user.username) : 'Username mavjud emas'}`,
+                `🆔 <code>${esc(user.telegram_id)}</code>`,
+                `${sourceLabels[user.user_type] ?? esc(user.user_type)}`,
                 '',
-                '🧾 Bu ko‘rish audit tarixiga yozildi.',
+                '🧾 Ushbu ko‘rish audit tarixiga saqlandi.',
               ].join('\n'),
               {
                 reply_markup: {
@@ -751,8 +794,13 @@ export async function handleUpdate(
 
           return directSendMessage(
             chatId,
-            `✅ <b>#${esc(adminReplyTicket)}</b> ga anonim javob yuborildi.`,
-            adminHome,
+            [
+              '✅ <b>Javob yuborildi!</b>',
+              '',
+              `<b>#${esc(adminReplyTicket)}</b> murojaat egasiga`,
+              'anonim tarzda yetkazildi.',
+            ].join('\n'),
+            adminReplySentKeyboard(adminReplyTicket),
           );
         }
       } catch (error) {
@@ -797,8 +845,13 @@ export async function handleUpdate(
 
         return directSendMessage(
           chatId,
-          `✅ <b>#${esc(replyTicket)}</b> bo‘yicha javobingiz yuborildi.`,
-          mainMenu(isAdmin(telegramId)),
+          [
+            '✅ <b>Javobingiz yuborildi!</b>',
+            '',
+            `<b>#${esc(replyTicket)}</b> murojaati bo‘yicha javob`,
+            'rahbariyatga yetkazildi.',
+          ].join('\n'),
+          userReplySentKeyboard(replyTicket),
         );
       }
     } catch (error) {

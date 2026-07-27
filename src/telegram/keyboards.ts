@@ -29,8 +29,8 @@ export const ticketTypes: Keyboard = {
   ],
 };
 
-export const adminHome: Keyboard = {
-  inline_keyboard: [
+export function adminHome(showAudit = false): Keyboard {
+  const rows: Button[][] = [
     [
       { text: '🆕 Yangi', callback_data: 'admin:list:new' },
       { text: '👀 Ko‘rilmoqda', callback_data: 'admin:list:reviewing' },
@@ -40,9 +40,15 @@ export const adminHome: Keyboard = {
       { text: '✅ Hal qilindi', callback_data: 'admin:list:resolved' },
     ],
     [{ text: '📚 Barchasi', callback_data: 'admin:list:all' }],
-    [{ text: '🏠 Oddiy menyu', callback_data: 'menu:home' }],
-  ],
-};
+  ];
+
+  if (showAudit) {
+    rows.push([{ text: '📜 Audit tarixi', callback_data: 'super:audit:list' }]);
+  }
+
+  rows.push([{ text: '🏠 Oddiy menyu', callback_data: 'menu:home' }]);
+  return { inline_keyboard: rows };
+}
 
 export const backHome: Keyboard = {
   inline_keyboard: [[{ text: '⬅️ Bosh menyu', callback_data: 'menu:home' }]],

@@ -162,3 +162,137 @@ export async function revealTicketIdentity(
   if (logError) throw logError;
   return user;
 }
+
+
+export type IdentityAuditLog = {
+  id: number;
+  ticket_id: string;
+  superadmin_telegram_id: number;
+  reason: string;
+  created_at: string;
+  ticket_code: string;
+  superadmin_name: string | null;
+  superadmin_username: string | null;
+};
+
+export async function listIdentityAuditLogs(
+  limit = 15,
+): Promise<IdentityAuditLog[]> {
+  const safeLimit = Math.min(Math.max(limit, 1), 30);
+
+  const { data: logs, error } = await supabase
+    .from('identity_logs')
+    .select('id,ticket_id,superadmin_telegram_id,reason,created_at,tickets(ticket_code)')
+    .order('created_at', { ascending: false })
+    .limit(safeLimit);
+
+  if (error) throw error;
+  if (!logs?.length) return [];
+
+  type RawAuditLog = {
+    id: number | string;
+    ticket_id: string;
+    superadmin_telegram_id: number | string;
+    reason: string;
+    created_at: string;
+    tickets: { ticket_code?: string } | { ticket_code?: string }[] | null;
+  };
+  type RawAdmin = {
+    telegram_id: number | string;
+    full_name: string | null;
+    username: string | null;
+  };
+
+  const rawLogs = logs as unknown as RawAuditLog[];
+  const adminIds = [
+    ...new Set(rawLogs.map((log) => Number(log.superadmin_telegram_id))),
+  ];
+
+  const { data: admins, error: adminError } = await supabase
+    .from('users')
+    .select('telegram_id,full_name,username')
+    .in('telegram_id', adminIds);
+
+  if (adminError) throw adminError;
+
+  const rawAdmins = (admins ?? []) as unknown as RawAdmin[];
+  const adminsById = new Map(
+    rawAdmins.map((admin) => [Number(admin.telegram_id), admin]),
+  );
+
+  return rawLogs.map((log) => {
+    const telegramId = Number(log.superadmin_telegram_id);
+    const admin = adminsById.get(telegramId);
+    const ticketRelation = log.tickets as unknown as
+      | { ticket_code?: string }
+      | { ticket_code?: string }[]
+      | null;
+    const ticketCode = Array.isArray(ticketRelation)
+      ? ticketRelation[0]?.ticket_code
+      : ticketRelation?.ticket_code;
+
+    return {
+      id: Number(log.id),
+      ticket_id: String(log.ticket_id),
+      superadmin_telegram_id: telegramId,
+      reason: String(log.reason),
+      created_at: String(log.created_at),
+      ticket_code: ticketCode ?? 'Noma’lum',
+      superadmin_name: admin?.full_name ?? null,
+      superadmin_username: admin?.username ?? null,
+    };
+  });
+}
+
+export async function getIdentityAuditLog(
+  auditId: number,
+): Promise<IdentityAuditLog | null> {
+  const { data: log, error } = await supabase
+    .from('identity_logs')
+    .select('id,ticket_id,superadmin_telegram_id,reason,created_at,tickets(ticket_code)')
+    .eq('id', auditId)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!log) return null;
+
+  type RawAuditDetail = {
+    id: number | string;
+    ticket_id: string;
+    superadmin_telegram_id: number | string;
+    reason: string;
+    created_at: string;
+    tickets: { ticket_code?: string } | { ticket_code?: string }[] | null;
+  };
+  type RawAdminDetail = {
+    full_name: string | null;
+    username: string | null;
+  };
+
+  const rawLog = log as unknown as RawAuditDetail;
+  const telegramId = Number(rawLog.superadmin_telegram_id);
+  const { data: admin, error: adminError } = await supabase
+    .from('users')
+    .select('full_name,username')
+    .eq('telegram_id', telegramId)
+    .maybeSingle();
+
+  if (adminError) throw adminError;
+
+  const rawAdmin = admin as unknown as RawAdminDetail | null;
+  const ticketRelation = rawLog.tickets;
+  const ticketCode = Array.isArray(ticketRelation)
+    ? ticketRelation[0]?.ticket_code
+    : ticketRelation?.ticket_code;
+
+  return {
+    id: Number(rawLog.id),
+    ticket_id: String(rawLog.ticket_id),
+    superadmin_telegram_id: telegramId,
+    reason: String(rawLog.reason),
+    created_at: String(rawLog.created_at),
+    ticket_code: ticketCode ?? 'Noma’lum',
+    superadmin_name: rawAdmin?.full_name ?? null,
+    superadmin_username: rawAdmin?.username ?? null,
+  };
+}

@@ -26,6 +26,8 @@ import {
   getMyTicket,
   getTicketOwnerId,
   listAdminTickets,
+  listIdentityAuditLogs,
+  getIdentityAuditLog,
   listMyTickets,
   revealTicketIdentity,
   updateTicketStatus,
@@ -57,6 +59,22 @@ const sourceLabels: Record<string, string> = {
   employee: '💼 Xodim',
   unknown: '👤 Foydalanuvchi',
 };
+
+function formatAuditDate(value: string): string {
+  try {
+    return new Intl.DateTimeFormat('uz-UZ', {
+      timeZone: 'Asia/Tashkent',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(new Date(value));
+  } catch {
+    return value;
+  }
+}
 
 function directSendMessage(
   chatId: number,
@@ -351,7 +369,7 @@ export async function handleUpdate(
     return directSendMessage(
       message.chat.id,
       '🛠 <b>ADMIN PANEL</b>\n\nMurojaatlarni holati bo‘yicha boshqaring:',
-      adminHome,
+      adminHome(isSuperadmin(message.from.id)),
     );
   }
 
@@ -556,7 +574,7 @@ export async function handleUpdate(
           chatId,
           messageId,
           '🛠 <b>ADMIN PANEL</b>\n\nMurojaatlarni holati bo‘yicha boshqaring:',
-          { reply_markup: adminHome },
+          { reply_markup: adminHome(superadmin) },
         ).catch((error) => console.error('Admin home failed:', error)),
       );
       return directAnswerCallback(callback.id);
@@ -672,6 +690,150 @@ export async function handleUpdate(
     }
 
     // SUPERADMIN
+    if (data === 'super:audit:list') {
+      if (!superadmin) return directAnswerCallback(callback.id);
+
+      waitUntil(
+        (async () => {
+          try {
+            const logs = await listIdentityAuditLogs(15);
+
+            if (!logs.length) {
+              await editMessageText(
+                chatId,
+                messageId,
+                [
+                  '📜 <b>AUDIT TARIXI</b>',
+                  '',
+                  'Hozircha muallif ma’lumoti ochilgan holatlar yo‘q.',
+                ].join('\n'),
+                {
+                  reply_markup: {
+                    inline_keyboard: [
+                      [{ text: '⬅️ Admin panel', callback_data: 'admin:home' }],
+                    ],
+                  },
+                },
+              );
+              return;
+            }
+
+            const buttons: Button[][] = logs.map((log) => [
+              {
+                text: `#${log.ticket_code} • ${log.reason} • ${formatAuditDate(log.created_at)}`,
+                callback_data: `super:audit:view:${log.id}`,
+              },
+            ]);
+
+            buttons.push([
+              { text: '🔄 Yangilash', callback_data: 'super:audit:list' },
+            ]);
+            buttons.push([
+              { text: '⬅️ Admin panel', callback_data: 'admin:home' },
+            ]);
+
+            await editMessageText(
+              chatId,
+              messageId,
+              [
+                '📜 <b>AUDIT TARIXI</b>',
+                '',
+                'Muallif ma’lumotini ochish bo‘yicha so‘nggi harakatlar:',
+                '',
+                `Jami ko‘rsatilmoqda: <b>${logs.length}</b> ta`,
+              ].join('\n'),
+              { reply_markup: { inline_keyboard: buttons } },
+            );
+          } catch (error) {
+            console.error('Audit list failed:', error);
+            await editMessageText(
+              chatId,
+              messageId,
+              '⚠️ Audit tarixini yuklab bo‘lmadi.',
+              {
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: '⬅️ Admin panel', callback_data: 'admin:home' }],
+                  ],
+                },
+              },
+            ).catch(() => undefined);
+          }
+        })(),
+      );
+      return directAnswerCallback(callback.id);
+    }
+
+    if (data.startsWith('super:audit:view:')) {
+      if (!superadmin) return directAnswerCallback(callback.id);
+
+      const auditId = Number(data.replace('super:audit:view:', ''));
+      if (!Number.isSafeInteger(auditId) || auditId <= 0) {
+        return directAnswerCallback(callback.id);
+      }
+
+      waitUntil(
+        (async () => {
+          try {
+            const log = await getIdentityAuditLog(auditId);
+
+            if (!log) {
+              await editMessageText(chatId, messageId, '⚠️ Audit yozuvi topilmadi.', {
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: '⬅️ Audit tarixiga', callback_data: 'super:audit:list' }],
+                  ],
+                },
+              });
+              return;
+            }
+
+            const adminName = log.superadmin_name
+              ? esc(log.superadmin_name)
+              : 'Nomi bazada mavjud emas';
+            const adminUsername = log.superadmin_username
+              ? `@${esc(log.superadmin_username)}`
+              : 'Username mavjud emas';
+
+            await editMessageText(
+              chatId,
+              messageId,
+              [
+                '📜 <b>AUDIT YOZUVI</b>',
+                '',
+                `📨 Murojaat: <b>#${esc(log.ticket_code)}</b>`,
+                `🔎 Sabab: <b>${esc(log.reason)}</b>`,
+                `🕐 Vaqt: <b>${esc(formatAuditDate(log.created_at))}</b>`,
+                '',
+                '<b>Muallif ma’lumotini ochgan superadmin:</b>',
+                `👤 ${adminName}`,
+                `🔗 ${adminUsername}`,
+                `🆔 <code>${esc(log.superadmin_telegram_id)}</code>`,
+                '',
+                '🔒 Audit yozuvi faqat superadminlar uchun ko‘rinadi.',
+              ].join('\n'),
+              {
+                reply_markup: {
+                  inline_keyboard: [
+                    [
+                      {
+                        text: '📨 Murojaatni ochish',
+                        callback_data: `admin:view:${log.ticket_code}`,
+                      },
+                    ],
+                    [{ text: '⬅️ Audit tarixiga', callback_data: 'super:audit:list' }],
+                  ],
+                },
+              },
+            );
+          } catch (error) {
+            console.error('Audit detail failed:', error);
+          }
+        })(),
+      );
+      return directAnswerCallback(callback.id);
+    }
+
     if (data.startsWith('super:reveal:')) {
       if (!superadmin) return directAnswerCallback(callback.id);
       const ticketCode = data.replace('super:reveal:', '');

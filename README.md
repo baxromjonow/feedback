@@ -1,3 +1,28 @@
+# Al-Aziz Academy Feedback Bot — v0.3.0
+
+## Yangi: Superadmin Audit tarixi
+
+- Admin panelda faqat superadminlarga `📜 Audit tarixi` tugmasi ko‘rinadi.
+- Oxirgi 15 ta muallif ma’lumotini ochish hodisasi ko‘rsatiladi.
+- Har bir auditda: ticket raqami, sabab, Toshkent vaqti, superadmin ismi/username/Telegram ID ko‘rinadi.
+- Audit yozuvidan murojaatning o‘ziga o‘tish mumkin.
+- Oddiy admin audit bo‘limiga kira olmaydi.
+- Mavjud `identity_logs` jadvalidan foydalanadi — yangi SQL migration shart emas.
+
+## Yangilash
+
+```bash
+npm install
+npm run typecheck
+git add .
+git commit -m "Feedback bot v0.3 audit history"
+git push
+```
+
+Vercel pushdan keyin avtomatik deploy qiladi.
+
+---
+
 # Al-Aziz Academy Feedback Bot — v0.2.1
 
 ## Tuzatilganlar
